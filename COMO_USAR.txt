@@ -1,0 +1,101 @@
+========================================================
+  ATUALIZADOR DE PREÇOS — Bling para Multiloja
+========================================================
+
+SOBRE O PROGRAMA
+----------------
+Este programa atualiza automaticamente os preços dos produtos
+nas lojas virtuais (Shopee, Magalu, Nuvemshop, entre outras)
+com base nos preços cadastrados no Bling (ERP).
+
+O objetivo é evitar erros manuais e agilizar o processo
+de atualização em múltiplas lojas.
+
+
+ARQUIVOS NECESSÁRIOS
+--------------------
+Coloque na mesma pasta do programa:
+
+1. Arquivo de produtos do Bling
+   Pode ser:
+     produtos.csv
+     ou qualquer arquivo que comece com "produtos"
+
+2. Arquivos da Multiloja (um para cada loja)
+   Exemplo:
+     vinculo_produtos_multiloja_2026-03-24.csv
+
+Os arquivos são identificados automaticamente.
+Não é necessário renomear.
+
+
+COMO EXPORTAR OS ARQUIVOS
+-------------------------
+No Bling:
+
+Produtos:
+  Produtos > Exportar > CSV
+
+Multiloja (para cada loja):
+  Integrações > Multilojas > selecionar loja > Exportar produtos
+
+
+COMO USAR O PROGRAMA
+--------------------
+1. Abra a pasta do programa
+2. Cole os arquivos CSV exportados
+3. Execute o arquivo "interface.pyw" com duplo clique
+4. Verifique se os arquivos foram detectados corretamente
+5. Clique em "Executar atualização"
+6. Aguarde o processamento
+7. Abra a pasta "saidas" para ver os arquivos gerados
+
+
+ARQUIVOS GERADOS
+----------------
+Na pasta "saidas", será criado:
+
+- [loja]_atualizado.csv
+  Arquivo pronto para importar no Bling
+
+- [loja]_relatorio.csv
+  Lista apenas os produtos que tiveram alteração de preço
+
+
+COMO IMPORTAR NO BLING
+----------------------
+Acesse:
+  Integrações > Multilojas > selecionar loja > Importar produtos
+
+Selecione o arquivo "_atualizado.csv" correspondente.
+
+
+COMPORTAMENTO DO PROGRAMA
+--------------------------
+- Atualiza o preço normal com base no Bling
+- Ajusta o preço promocional para não ficar maior que o normal
+- Remove produtos sem vínculo com a loja (sem ID)
+- Mantém produtos que não existem no Bling
+
+
+REQUISITOS
+----------
+- Python 3.8 ou superior
+- Biblioteca pandas instalada
+
+Para instalar:
+  pip install pandas
+
+
+PROBLEMAS COMUNS
+----------------
+Janela não abre:
+  Clique com o botão direito no arquivo e selecione "Abrir com > Python"
+
+Erro de biblioteca:
+  Execute: pip install pandas
+
+Arquivo não detectado:
+  Verifique se está na mesma pasta do programa
+
+========================================================
