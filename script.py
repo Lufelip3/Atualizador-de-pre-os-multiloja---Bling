@@ -1,21 +1,28 @@
 """
-script.py — Motor de atualizacao de precos
-==========================================
-Le o catalogo exportado do Bling (produtos.csv) e os arquivos de vinculo
-exportados do modulo Multiloja. Para cada produto encontrado nas duas fontes,
-sobrescreve o preco da loja com o preco vigente do Bling.
+script.py — Motor de atualizacao de precos (v2.0)
+==================================================
+Le o catalogo exportado do Bling (de inputs/ ou de arquivos ZIP) e os arquivos
+de vinculo das multilojas (Shopee, Magalu, Nuvemshop, etc.). Para cada produto
+encontrado nas duas fontes, atualiza o preco na multiloja com base no Bling.
 
-Regras de negocio principais:
-- Produtos sem ID de loja valido sao removidos do arquivo de saida.
-- O preco promocional so e atualizado se ja existia um valor maior que zero;
-  caso contrario, permanece em branco (evita criar promocoes involuntarias).
-- Os arquivos de saida sao gravados na subpasta "saidas/" sem sobrescrever
-  os originais.
+Regras de negocio e fluxo principais:
+1. Extrai automaticamente CSVs de arquivos ZIP em "inputs/" para "_extraidos/",
+   evitando colisoes de nomes ao adicionar o nome do ZIP como prefixo.
+2. Identifica automaticamente o arquivo do Bling e os arquivos de multiloja.
+3. Limpa as pastas "saidas/" e "_extraidos/" antes de cada execucao.
+4. Produtos sem ID de loja valido sao removidos do arquivo de saida.
+5. O preco promocional so e atualizado se ja existia um valor maior que zero;
+   caso contrario, permanece em branco (evita criar promocoes involuntarias).
+6. Os arquivos de saida sao gravados na subpasta "saidas/" com o sufixo "_atualizado.csv".
+7. Realiza validacao de catalogo exibindo no terminal alertas coloridos para produtos
+   faltantes (ausentes em todas as lojas), parciais (ausentes em algumas lojas) ou
+   fantasmas (cadastrados nas lojas mas nao presentes no Bling).
 """
 
 import os
 import sys
 import glob
+import zipfile
 import unicodedata
 
 import pandas as pd
@@ -28,12 +35,80 @@ sys.stdout.reconfigure(encoding="utf-8")
 # atalho da interface grafica).
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
+PASTA_INPUTS = "inputs"
 PASTA_SAIDA = "saidas"
-os.makedirs(PASTA_SAIDA, exist_ok=True)
+PASTA_EXTRAIDOS = "_extraidos"
 
 # Codigos de cor ANSI usados apenas no terminal — nao afetam os arquivos CSV.
 COR_VERMELHO = "\033[91m"
+COR_LARANJA = "\033[33m"
+COR_MAGENTA = "\033[95m"
 COR_RESET = "\033[0m"
+
+
+# ==============================================================================
+# EXTRACAO DE ZIPS
+# ==============================================================================
+
+def extrair_csvs_de_zips():
+    """
+    Varre a pasta inputs/ em busca de arquivos .zip e extrai os CSVs contidos
+    neles para a subpasta _extraidos/.
+
+    Para evitar conflitos de nome (todos os ZIPs do Bling exportam CSVs com
+    nomes identicos como 'produtos.csv'), cada arquivo extraido recebe o
+    nome do ZIP como prefixo. Exemplo:
+        nuvemshop.zip  →  _extraidos/nuvemshop_produtos.csv
+        shopee.zip     →  _extraidos/shopee_produtos.csv
+
+    Se a pasta _extraidos/ ja existir, ela e limpa antes da nova extracao
+    para evitar arquivos obsoletos de execucoes anteriores (mantendo o .gitkeep).
+    """
+    zips = sorted(glob.glob(os.path.join(PASTA_INPUTS, "*.zip")))
+    if not zips:
+        return []
+
+    # Limpa extraidos anteriores para evitar lixo de execucoes passadas
+    if os.path.exists(PASTA_EXTRAIDOS):
+        import shutil
+        for item in os.listdir(PASTA_EXTRAIDOS):
+            if item == ".gitkeep": continue
+            c = os.path.join(PASTA_EXTRAIDOS, item)
+            try:
+                if os.path.isfile(c): os.remove(c)
+                elif os.path.isdir(c): shutil.rmtree(c)
+            except Exception: pass
+    os.makedirs(PASTA_EXTRAIDOS, exist_ok=True)
+
+    zips_processados = []
+
+    for zip_path in zips:
+        nome_zip = os.path.splitext(os.path.basename(zip_path))[0]
+        try:
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                csvs_no_zip = [n for n in zf.namelist() if n.lower().endswith(".csv")]
+                if not csvs_no_zip:
+                    print(f"ZIP ignorado (sem CSVs): {zip_path}")
+                    continue
+
+                for csv_interno in csvs_no_zip:
+                    nome_csv = os.path.basename(csv_interno)
+                    # Prefixo do ZIP para evitar colisao de nomes
+                    nome_destino = f"{nome_zip}_{nome_csv}"
+                    caminho_destino = os.path.join(PASTA_EXTRAIDOS, nome_destino)
+
+                    with zf.open(csv_interno) as fonte, open(caminho_destino, "wb") as destino:
+                        destino.write(fonte.read())
+
+                    print(f"ZIP extraido: {zip_path} → {caminho_destino}")
+
+                zips_processados.append(zip_path)
+        except zipfile.BadZipFile:
+            print(f"AVISO: '{zip_path}' nao e um ZIP valido, ignorando.")
+        except Exception as erro:
+            print(f"AVISO: erro ao processar '{zip_path}': {erro}")
+
+    return zips_processados
 
 
 # ==============================================================================
@@ -42,27 +117,39 @@ COR_RESET = "\033[0m"
 
 def localizar_arquivo_bling() -> str:
     """
-    Procura o arquivo de produtos exportado do Bling na pasta atual.
+    Procura o arquivo de produtos exportado do Bling na pasta inputs/ e na
+    subpasta _extraidos/.
 
     Estrategia de busca (em ordem de prioridade):
-    1. 'produtos.csv' (nome exato, mais previsivel)
-    2. 'produtos_*.csv' (exportacoes com timestamp do Bling)
+    1. 'produtos.csv' na pasta inputs/ (nome exato, mais previsivel)
+    2. 'produtos_*.csv' na pasta inputs/ (exportacoes com timestamp do Bling)
+    3. Qualquer '*produtos*.csv' em _extraidos/ (extraido de ZIP)
 
     Retorna o caminho do arquivo encontrado ou lanca FileNotFoundError.
     """
-    candidato_fixo = "produtos.csv"
+    candidato_fixo = os.path.join(PASTA_INPUTS, "produtos.csv")
     if os.path.exists(candidato_fixo):
         print(f"Bling    : {candidato_fixo}")
         return candidato_fixo
 
     # Fallback: pega o mais recente quando ha mais de um arquivo com timestamp
-    candidatos_com_data = sorted(glob.glob("produtos_*.csv"))
+    candidatos_com_data = sorted(glob.glob(os.path.join(PASTA_INPUTS, "produtos_*.csv")))
     if candidatos_com_data:
         arquivo = candidatos_com_data[-1]
         print(f"Bling    : {arquivo}  (encontrado automaticamente)")
         return arquivo
 
-    csvs_presentes = glob.glob("*.csv")
+    # Busca em _extraidos/ (CSVs vindos de ZIP)
+    if os.path.isdir(PASTA_EXTRAIDOS):
+        candidatos_extraidos = sorted(glob.glob(os.path.join(PASTA_EXTRAIDOS, "*produtos*.csv")))
+        # Filtra os que são nitidamente de vínculo/multiloja
+        candidatos_validos = [c for c in candidatos_extraidos if "vinculo" not in c.lower() and "multiloja" not in c.lower()]
+        if candidatos_validos:
+            arquivo = candidatos_validos[-1]
+            print(f"Bling    : {arquivo}  (extraido de ZIP)")
+            return arquivo
+
+    csvs_presentes = glob.glob(os.path.join(PASTA_INPUTS, "*.csv"))
     raise FileNotFoundError(
         "Arquivo de produtos do Bling nao encontrado.\n"
         f"Esperado: 'produtos.csv' ou 'produtos_*.csv'\n"
@@ -72,9 +159,9 @@ def localizar_arquivo_bling() -> str:
 
 def localizar_arquivos_multiloja(arquivo_bling: str) -> list[str]:
     """
-    Varre todos os CSVs da pasta e identifica os arquivos de multiloja pelo
-    cabecalho, nao pelo nome — isso funciona independente de como o usuario
-    nomeou o arquivo ao exportar do Bling.
+    Varre todos os CSVs da pasta inputs/ e da subpasta _extraidos/ e identifica
+    os arquivos de multiloja pelo cabecalho, nao pelo nome — isso funciona
+    independente de como o usuario nomeou o arquivo ao exportar do Bling.
 
     Um arquivo e considerado multiloja se contiver a coluna 'IdProduto' ou
     'Nome Loja (Multilojas)', que sao colunas-chave do modulo Multiloja do Bling.
@@ -83,8 +170,13 @@ def localizar_arquivos_multiloja(arquivo_bling: str) -> list[str]:
     """
     arquivos_multiloja = []
 
-    for csv in sorted(glob.glob("*.csv")):
-        if csv == arquivo_bling:
+    # Coleta CSVs da pasta inputs + _extraidos/
+    todos_csvs = sorted(glob.glob(os.path.join(PASTA_INPUTS, "*.csv")))
+    if os.path.isdir(PASTA_EXTRAIDOS):
+        todos_csvs += sorted(glob.glob(os.path.join(PASTA_EXTRAIDOS, "*.csv")))
+
+    for csv in todos_csvs:
+        if os.path.abspath(csv) == os.path.abspath(arquivo_bling):
             continue
 
         try:
@@ -99,12 +191,13 @@ def localizar_arquivos_multiloja(arquivo_bling: str) -> list[str]:
 
     if not arquivos_multiloja:
         raise FileNotFoundError(
-            "Nenhum arquivo de multiloja encontrado na pasta.\n"
-            f"CSVs presentes: {glob.glob('*.csv')}"
+            "Nenhum arquivo de multiloja encontrado na pasta inputs/.\n"
+            f"CSVs na pasta: {glob.glob(os.path.join(PASTA_INPUTS, '*.csv'))}"
         )
 
     for arquivo in arquivos_multiloja:
-        print(f"Multiloja: {arquivo}")
+        origem = " (via ZIP)" if PASTA_EXTRAIDOS in arquivo else ""
+        print(f"Multiloja: {arquivo}{origem}")
 
     return arquivos_multiloja
 
@@ -124,6 +217,15 @@ def remover_acentos(texto: str) -> str:
         for caractere in unicodedata.normalize("NFD", str(texto))
         if unicodedata.category(caractere) != "Mn"
     ).lower()
+
+
+def detectar_coluna_nome(colunas: list[str]) -> str | None:
+    """Encontra a coluna de nome/descricao do produto."""
+    for coluna in colunas:
+        nome = remover_acentos(coluna)
+        if "descricao" in nome or "nome" in nome:
+            return coluna
+    return None
 
 
 def detectar_coluna_codigo(colunas: list[str]) -> str | None:
@@ -240,9 +342,9 @@ def formatar_preco_para_csv(valor: float) -> str:
 # LEITURA DO CATALOGO BLING
 # ==============================================================================
 
-def carregar_catalogo_bling(caminho_arquivo: str) -> dict[str, float]:
+def carregar_catalogo_bling(caminho_arquivo: str) -> dict[str, dict]:
     """
-    Le o CSV do Bling e retorna um dicionario {codigo_produto: preco_de_venda}.
+    Le o CSV do Bling e retorna um dicionario {codigo_produto: {"preco": valor, "nome": nome}}.
 
     Esse dicionario e a 'fonte da verdade' para os precos — qualquer preco
     diferente nos arquivos de multiloja sera sobrescrito com o valor daqui.
@@ -254,6 +356,7 @@ def carregar_catalogo_bling(caminho_arquivo: str) -> dict[str, float]:
 
     coluna_codigo = detectar_coluna_codigo(bling.columns)
     coluna_preco = detectar_coluna_preco(bling.columns)
+    coluna_nome = detectar_coluna_nome(bling.columns)
 
     if not coluna_codigo or not coluna_preco:
         raise Exception(
@@ -266,8 +369,13 @@ def carregar_catalogo_bling(caminho_arquivo: str) -> dict[str, float]:
 
     codigos = bling[coluna_codigo].astype(str).str.strip()
     precos = converter_preco_para_float(bling[coluna_preco])
+    nomes = bling[coluna_nome].astype(str).str.strip() if coluna_nome else ["Sem nome"] * len(bling)
 
-    return dict(zip(codigos, precos))
+    catalogo = {}
+    for cod, prc, nm in zip(codigos, precos, nomes):
+        catalogo[cod] = {"preco": prc, "nome": nm}
+        
+    return catalogo
 
 
 # ==============================================================================
@@ -298,41 +406,22 @@ def calcular_alteracoes_de_preco(
     dataframe: pd.DataFrame,
     codigos: pd.Series,
     precos_atuais: pd.Series,
-    catalogo_bling: dict[str, float],
+    catalogo_bling: dict[str, dict],
     nome_arquivo: str,
-) -> list[dict]:
+) -> int:
     """
-    Compara os precos do arquivo de multiloja com o catalogo do Bling e retorna
-    uma lista com os produtos cujo preco mudou.
-
-    Essa lista e usada para gerar o relatorio de alteracoes — util para auditoria
-    e para o usuario entender o que foi modificado em cada execucao.
+    Apenas conta as alterações para log. Relatório em arquivo foi removido.
     """
-    alteracoes = []
-
+    qtd = 0
     for indice, codigo in enumerate(codigos):
-        preco_bling = catalogo_bling.get(codigo)
+        produto_bling = catalogo_bling.get(codigo)
+        if produto_bling is None: continue
+        
         preco_multiloja = precos_atuais.iloc[indice]
+        preco_mudou = round(produto_bling["preco"], 2) != round(preco_multiloja, 2)
+        if preco_mudou: qtd += 1
 
-        # Produto nao encontrado no Bling — nao ha o que atualizar
-        if preco_bling is None:
-            continue
-
-        # Compara com arredondamento para evitar falsos positivos por
-        # imprecisao de ponto flutuante (ex: 99.999999 != 100.0)
-        preco_mudou = round(preco_bling, 2) != round(preco_multiloja, 2)
-        if preco_mudou:
-            nome_produto = dataframe["Nome"].iloc[indice] if "Nome" in dataframe.columns else ""
-            alteracoes.append({
-                "Arquivo": nome_arquivo,
-                "Codigo": codigo,
-                "Nome": nome_produto,
-                "Preco_Antigo": preco_multiloja,
-                "Preco_Novo": preco_bling,
-                "Diferenca": round(preco_bling - preco_multiloja, 2),
-            })
-
-    return alteracoes
+    return qtd
 
 
 def aplicar_novos_precos(
@@ -342,31 +431,23 @@ def aplicar_novos_precos(
     coluna_promo: str | None,
     precos_atuais_num: pd.Series,
     precos_promo_num: pd.Series | None,
-    catalogo_bling: dict[str, float],
+    catalogo_bling: dict[str, dict],
 ) -> pd.DataFrame:
     """
     Atualiza as colunas de preco no dataframe com os valores do Bling.
-
-    Regra do preco promocional:
-    Se o produto tinha um preco promocional configurado (> 0), ele tambem e
-    atualizado para o novo preco de venda. Isso garante que a promocao nao fique
-    com um valor maior que o preco normal apos a atualizacao.
-
-    Se o campo promocional estava vazio (0 ou em branco), ele nao e preenchido —
-    isso evita criar promocoes involuntarias em produtos que nunca tiveram.
     """
     novos_precos = []
     novos_promos = []
 
     for indice, codigo in enumerate(codigos):
-        preco_bling = catalogo_bling.get(codigo)
+        produto_bling = catalogo_bling.get(codigo)
 
-        if preco_bling is None:
-            # Produto nao encontrado no Bling — mantém o valor original
+        if produto_bling is None:
             novos_precos.append(dataframe[coluna_preco].iloc[indice])
             if coluna_promo:
                 novos_promos.append(dataframe[coluna_promo].iloc[indice])
         else:
+            preco_bling = produto_bling["preco"]
             novos_precos.append(formatar_preco_para_csv(preco_bling))
             if coluna_promo:
                 preco_promo_atual = precos_promo_num.iloc[indice] if precos_promo_num is not None else 0
@@ -385,25 +466,22 @@ def aplicar_novos_precos(
 
 def processar_arquivo_multiloja(
     caminho_arquivo: str,
-    catalogo_bling: dict[str, float],
+    catalogo_bling: dict[str, dict],
+    lojas_por_produto: dict[str, set[str]],
+    nomes_extras: dict[str, str]
 ) -> tuple[int, int]:
     """
-    Orquestra o processamento completo de um arquivo de multiloja:
-    1. Leitura e deteccao de colunas
-    2. Filtragem de produtos sem ID de loja
-    3. Calculo das alteracoes de preco
-    4. Atualizacao dos precos
-    5. Gravacao dos arquivos de saida
-
-    Retorna (qtd_alteracoes, qtd_removidos) para o totalizador final.
+    Orquestra o processamento completo de um arquivo de multiloja.
+    Registra quais produtos do bling estao nesta loja em lojas_por_produto.
     """
     print(f"\n{'=' * 55}")
     print(f"Processando: {caminho_arquivo}")
+    
+    nome_loja = os.path.basename(caminho_arquivo).split('_')[0].capitalize()
 
     multiloja = pd.read_csv(caminho_arquivo, sep=";", encoding="utf-8-sig")
     multiloja.columns = multiloja.columns.str.replace('"', "").str.strip()
 
-    # Detecta as colunas relevantes pelo conteudo do cabecalho
     coluna_codigo = detectar_coluna_codigo(multiloja.columns)
     coluna_preco = detectar_coluna_preco(multiloja.columns)
     coluna_promo = detectar_coluna_preco_promocional(multiloja.columns)
@@ -418,39 +496,37 @@ def processar_arquivo_multiloja(
     print(f"Preco Promo  : {coluna_promo}")
     print(f"ID na Loja   : {coluna_id_loja}")
 
-    # Limpa espacos extras no campo de ID (pode causar falso negativo na validacao)
     if coluna_id_loja:
         multiloja[coluna_id_loja] = multiloja[coluna_id_loja].astype(str).str.strip()
 
-    # Separa produtos publicados dos nao publicados antes de processar
     multiloja, produtos_sem_id = separar_produtos_sem_id_de_loja(multiloja, coluna_id_loja)
 
-    # Pre-converte os precos para float para facilitar a comparacao e os calculos
     precos_atuais_num = converter_preco_para_float(multiloja[coluna_preco])
     precos_promo_num = converter_preco_para_float(multiloja[coluna_promo]) if coluna_promo else None
     codigos = multiloja[coluna_codigo].astype(str).str.strip()
+    
+    coluna_nome = detectar_coluna_nome(multiloja.columns)
+    nomes_multiloja = multiloja[coluna_nome].astype(str).str.strip() if coluna_nome else ["Sem nome"] * len(multiloja)
+    
+    # Registra a presenca de cada codigo valido nesta loja
+    for cod, nome in zip(codigos, nomes_multiloja):
+        lojas_por_produto.setdefault(cod, set()).add(nome_loja)
+        nomes_extras[cod] = nome
 
-    # Gera o relatorio antes de modificar o dataframe
-    alteracoes = calcular_alteracoes_de_preco(
+    qtd_alteracoes = calcular_alteracoes_de_preco(
         multiloja, codigos, precos_atuais_num, catalogo_bling, caminho_arquivo
     )
 
-    # Aplica os novos precos diretamente no dataframe
     multiloja = aplicar_novos_precos(
         multiloja, codigos, coluna_preco, coluna_promo,
         precos_atuais_num, precos_promo_num, catalogo_bling
     )
 
-    # Salva usando o nome original com sufixo para nao sobrescrever o original
     nome_base = os.path.splitext(os.path.basename(caminho_arquivo))[0]
     caminho_saida = os.path.join(PASTA_SAIDA, f"{nome_base}_atualizado.csv")
-    caminho_relatorio = os.path.join(PASTA_SAIDA, f"{nome_base}_relatorio.csv")
 
     multiloja.to_csv(caminho_saida, sep=";", index=False, encoding="utf-8-sig")
-    pd.DataFrame(alteracoes).to_csv(caminho_relatorio, sep=";", index=False, encoding="utf-8-sig")
 
-    # Log de resumo por arquivo
-    qtd_alteracoes = len(alteracoes)
     qtd_removidos = len(produtos_sem_id)
 
     print(f"\n{qtd_alteracoes} produto(s) com preco alterado.")
@@ -472,22 +548,50 @@ def processar_arquivo_multiloja(
 def main():
     """
     Fluxo principal do script:
-    1. Localiza os arquivos de entrada
-    2. Carrega o catalogo de precos do Bling
-    3. Processa cada arquivo de multiloja encontrado
-    4. Exibe o resumo final
+    1. Extrai CSVs de arquivos ZIP
+    2. Localiza arquivos de entrada
+    3. Carrega o catalogo Bling e rastreia em quais lojas eles estao presentes
+    4. Gera os arquivos finais em saidas/ e reporta produtos faltantes
     """
+    extrair_csvs_de_zips()
     arquivo_bling = localizar_arquivo_bling()
     arquivos_multiloja = localizar_arquivos_multiloja(arquivo_bling)
     catalogo_bling = carregar_catalogo_bling(arquivo_bling)
+    
+    lojas_por_produto = {}
+    nomes_extras = {}
+    todas_lojas_encontradas = {os.path.basename(a).split('_')[0].capitalize() for a in arquivos_multiloja}
+    total_lojas = len(todas_lojas_encontradas)
 
     total_alteracoes = 0
     total_removidos = 0
 
     for arquivo in arquivos_multiloja:
-        alteracoes, removidos = processar_arquivo_multiloja(arquivo, catalogo_bling)
+        alteracoes, removidos = processar_arquivo_multiloja(arquivo, catalogo_bling, lojas_por_produto, nomes_extras)
         total_alteracoes += alteracoes
         total_removidos += removidos
+
+    print(f"\n{'=' * 55}")
+    print(f"VALIDACAO MULTILOJA (PRODUTOS FALTANTES)\n")
+    
+    for codigo, dados in catalogo_bling.items():
+        lojas_do_produto = lojas_por_produto.get(codigo, set())
+        nome = dados['nome']
+        
+        if not lojas_do_produto:
+            print(f"{COR_VERMELHO}FALTANTE: {nome} (Cod: {codigo}) nao esta em NENHUMA multiloja{COR_RESET}")
+        elif len(lojas_do_produto) < total_lojas:
+            faltantes = todas_lojas_encontradas - lojas_do_produto
+            print(f"{COR_LARANJA}PARCIAL:  {nome} (Cod: {codigo}) esta em {', '.join(lojas_do_produto)} mas NAO esta em {', '.join(faltantes)}{COR_RESET}")
+
+    # Verifica produtos que estão nas multilojas, mas NÃO estão no Bling
+    produtos_fantasmas = set(lojas_por_produto.keys()) - set(catalogo_bling.keys())
+    if produtos_fantasmas:
+        print(f"\n{COR_MAGENTA}ATENCAO: OS SEGUINTES PRODUTOS ESTAO NAS LOJAS MAS NAO FORAM EXPORTADOS DO BLING:{COR_RESET}")
+        for cod in produtos_fantasmas:
+            lojas = lojas_por_produto[cod]
+            nome = nomes_extras.get(cod, 'Sem nome')
+            print(f"{COR_MAGENTA}FANTASMA: {nome} (Cod: {cod}) encontrado em {', '.join(lojas)}{COR_RESET}")
 
     print(f"\n{'=' * 55}")
     print(f"CONCLUIDO: {total_alteracoes} alteracao(oes) | {total_removidos} removido(s) no total")

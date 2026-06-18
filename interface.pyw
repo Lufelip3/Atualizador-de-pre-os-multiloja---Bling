@@ -1,405 +1,416 @@
-"""
-interface.pyw — Interface grafica do Atualizador de Precos
-==========================================================
-Janela Tkinter que detecta os arquivos CSV na pasta do projeto, exibe
-o status de cada um e executa o script.py em segundo plano ao clicar
-em "Executar atualizacao".
-
-O arquivo usa a extensao .pyw para abrir sem janela de terminal no Windows.
-"""
-
 import os
 import re
 import sys
 import glob
+import zipfile
 import threading
 import subprocess
-from tkinter import ttk, scrolledtext, messagebox
 import tkinter as tk
+from tkinter import ttk, messagebox
 
 import pandas as pd
 
-# Pasta onde este arquivo esta salvo — serve de raiz para todas as operacoes.
-# Usar __file__ em vez de os.getcwd() garante que o caminho esteja correto
-# mesmo quando o usuario executa o arquivo por atalho ou de outro diretorio.
+# Pastas globais
 PASTA_BASE = os.path.dirname(os.path.abspath(__file__))
-
-# Mapa de codigos ANSI para cores do log (o script.py emite esses codigos
-# para colorir o terminal; aqui nos convertemos para cores Tkinter)
-CORES_ANSI = {
-    "91": "#ff6b6b",  # vermelho — produtos removidos / erros
-    "92": "#4ec94e",  # verde    — (reservado para uso futuro)
-    "93": "#f0c040",  # amarelo  — (reservado para uso futuro)
-    "0":  "#d4d4d4",  # reset    — cor padrao do log
-}
+PASTA_INPUTS = os.path.join(PASTA_BASE, "inputs")
+PASTA_EXTRAIDOS = os.path.join(PASTA_BASE, "_extraidos")
+PASTA_SAIDAS = os.path.join(PASTA_BASE, "saidas")
 
 
-# ==============================================================================
-# DETECCAO DE ARQUIVOS CSV NA PASTA
-# ==============================================================================
+class AtualizadorMultilojaApp:
+    # ── PALETA DE CORES (Tema Verde Dark) ───────────
+    COR_BG_RAIZ     = "#1a241c"
+    COR_BG_HEADER   = "#111812"
+    COR_BG_PAINEL   = "#1a241c"
+    COR_BG_LOG      = "#0b0f0b"
+    COR_TITULO      = "#86efac"
+    COR_BTN_ACAO    = "#15803d"
+    COR_BTN_ACAO_H  = "#166534"
+    
+    COR_SUBTITULO   = "#888899"
+    COR_LABEL       = "#ddddee"
+    COR_LOG_TEXT    = "#ccccdd"
+    COR_BTN_ABRIR   = "#3a3a5c"
+    COR_BTN_ABRIR_H = "#4a4a75"
 
-def detectar_csvs_na_pasta() -> tuple[str | None, list[str]]:
-    """
-    Varre a pasta base em busca dos arquivos de entrada esperados.
+    CORES_ANSI = {
+        "91": "#ff6b6b",  # vermelho — produtos removidos / erros
+        "92": "#4ec94e",  # verde    — sucesso
+        "93": "#f0c040",  # amarelo  
+        "95": "#ff33cc",  # magenta  — produtos fantasmas (chamativo)
+        "33": "#ff8c00",  # laranja  — produtos faltantes
+        "0":  "#ccccdd",  # reset    — cor padrao do log
+    }
 
-    Retorna uma tupla (arquivo_bling, lista_de_multilojas).
-    Usa a mesma logica do script.py para garantir consistencia — se o script
-    encontrar o arquivo, a interface tambem vai encontrar (e vice-versa).
-    """
-    arquivo_bling = None
-    arquivos_multiloja = []
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Atualizador de Precos — Bling → Multiloja")
+        self.root.geometry("660x620")
+        self.root.resizable(True, True)
+        self.root.minsize(660, 560)
+        self.root.configure(bg=self.COR_BG_RAIZ)
 
-    for csv in sorted(glob.glob(os.path.join(PASTA_BASE, "*.csv"))):
-        nome = os.path.basename(csv)
+        # Configurar estilo para a barra de progresso não ter borda branca
+        style = ttk.Style()
+        if "clam" in style.theme_names():
+            style.theme_use("clam")
+        style.configure("Dark.Horizontal.TProgressbar", 
+                        background=self.COR_BTN_ACAO, 
+                        troughcolor=self.COR_BG_LOG, 
+                        bordercolor=self.COR_BG_RAIZ, 
+                        lightcolor=self.COR_BTN_ACAO, 
+                        darkcolor=self.COR_BTN_ACAO)
 
-        if nome.startswith("produtos"):
-            arquivo_bling = csv
-            continue
+        self._criar_widgets()
+        self.atualizar_painel_de_status()
 
-        try:
-            cabecalho = pd.read_csv(csv, sep=";", encoding="utf-8-sig", nrows=0)
-            colunas = list(cabecalho.columns)
-            eh_multiloja = "IdProduto" in colunas or "Nome Loja (Multilojas)" in colunas
-            if eh_multiloja:
-                arquivos_multiloja.append(csv)
-        except Exception:
-            pass
-
-    return arquivo_bling, arquivos_multiloja
-
-
-# ==============================================================================
-# CONSTRUCAO DA JANELA
-# ==============================================================================
-
-janela = tk.Tk()
-janela.title("Atualizador de Precos — Bling → Multiloja")
-janela.geometry("620x560")
-janela.resizable(False, True)
-janela.minsize(620, 520)
-janela.configure(bg="#f0f2f5")
-
-# --- Cabecalho ---
-# Faixa azul no topo com o nome do sistema
-frame_cabecalho = tk.Frame(janela, bg="#2d6cdf", pady=14)
-frame_cabecalho.pack(fill="x")
-
-tk.Label(
-    frame_cabecalho,
-    text="Atualizador de Precos",
-    font=("Segoe UI", 15, "bold"),
-    bg="#2d6cdf",
-    fg="white",
-).pack()
-
-tk.Label(
-    frame_cabecalho,
-    text="Bling  →  Multiloja",
-    font=("Segoe UI", 10),
-    bg="#2d6cdf",
-    fg="#c8d9f7",
-).pack()
-
-# --- Painel de status dos arquivos ---
-# Exibe quais CSVs foram detectados na pasta; atualizado antes de cada execucao
-frame_status = tk.Frame(janela, bg="#f0f2f5", pady=10)
-frame_status.pack(fill="x", padx=24)
-
-
-def atualizar_painel_de_status():
-    """
-    Redesenha o painel de status dos arquivos com as informacoes mais recentes.
-
-    E chamada tanto na inicializacao quanto no inicio de cada execucao, para
-    refletir arquivos que o usuario possa ter adicionado desde que abriu a janela.
-    """
-    # Remove os widgets anteriores antes de redesenhar
-    for widget in frame_status.winfo_children():
-        widget.destroy()
-
-    tk.Label(
-        frame_status,
-        text="Arquivos detectados na pasta:",
-        font=("Segoe UI", 9, "bold"),
-        bg="#f0f2f5",
-        fg="#444",
-    ).pack(anchor="w")
-
-    arquivo_bling, arquivos_multiloja = detectar_csvs_na_pasta()
-
-    if arquivo_bling:
+    def _criar_widgets(self):
+        # ── HEADER ───────────
+        header = tk.Frame(self.root, bg=self.COR_BG_HEADER, pady=12)
+        header.pack(fill=tk.X)
+        
         tk.Label(
-            frame_status,
-            text=f"  OK   Bling: {os.path.basename(arquivo_bling)}",
-            font=("Segoe UI", 9),
-            bg="#f0f2f5",
-            fg="#1a7a3c",
-        ).pack(anchor="w")
-    else:
+            header,
+            text="Atualizador de Precos  💰",
+            font=("Helvetica", 17, "bold"),
+            bg=self.COR_BG_HEADER,
+            fg=self.COR_TITULO,
+        ).pack()
+        
         tk.Label(
-            frame_status,
-            text="  FALTA   Bling: nenhum arquivo produtos_*.csv encontrado",
-            font=("Segoe UI", 9),
-            bg="#f0f2f5",
-            fg="#c0392b",
+            header,
+            text="Bling  →  Multiloja",
+            font=("Helvetica", 9),
+            bg=self.COR_BG_HEADER,
+            fg=self.COR_SUBTITULO,
+        ).pack()
+
+        # ── PAINEL DE STATUS DOS ARQUIVOS ───────────
+        self.frame_status = tk.Frame(self.root, bg=self.COR_BG_PAINEL, pady=10)
+        self.frame_status.pack(fill=tk.X, padx=24)
+
+        ttk.Separator(self.root, orient="horizontal").pack(fill=tk.X, padx=24, pady=4)
+
+        # ── BOTÃO PRINCIPAL ───────────
+        frame_btn = tk.Frame(self.root, bg=self.COR_BG_RAIZ, pady=12)
+        frame_btn.pack(fill=tk.X, padx=24)
+
+        self.btn_executar = tk.Button(
+            frame_btn,
+            text="🚀  Executar Atualizacao",
+            bg=self.COR_BTN_ACAO,
+            fg="white",
+            font=("Arial", 12, "bold"),
+            relief="flat",
+            cursor="hand2",
+            padx=14, pady=8,
+            activebackground=self.COR_BTN_ACAO_H,
+            command=self.executar_atualizacao
+        )
+        self.btn_executar.pack(fill=tk.X, pady=(0, 8))
+
+        self.btn_abrir = tk.Button(
+            frame_btn,
+            text="📂  Abrir pasta saidas/",
+            bg=self.COR_BTN_ABRIR,
+            fg="white",
+            font=("Arial", 10),
+            relief="flat",
+            cursor="hand2",
+            padx=14, pady=5,
+            activebackground=self.COR_BTN_ABRIR_H,
+            command=self.abrir_pasta_saidas
+        )
+        self.btn_abrir.pack(fill=tk.X)
+
+        # ── BARRA DE PROGRESSO ───────────
+        self.barra_progresso = ttk.Progressbar(self.root, mode="indeterminate", style="Dark.Horizontal.TProgressbar")
+        self.barra_progresso.pack(fill=tk.X, padx=24, pady=(0, 8))
+
+        # ── ÁREA DE LOG ───────────
+        frame_log = tk.Frame(self.root, bg=self.COR_BG_RAIZ)
+        frame_log.pack(fill=tk.BOTH, expand=True, padx=24, pady=(0, 16))
+
+        tk.Label(
+            frame_log,
+            text="Log de execucao:",
+            font=("Segoe UI", 9, "bold"),
+            bg=self.COR_BG_RAIZ,
+            fg=self.COR_SUBTITULO,
         ).pack(anchor="w")
 
-    if arquivos_multiloja:
-        for caminho in arquivos_multiloja:
+        container = tk.Frame(frame_log, bg=self.COR_BG_LOG)
+        container.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
+        
+        self.area_log = tk.Text(
+            container,
+            font=("Consolas", 10),
+            bg=self.COR_BG_LOG,
+            fg=self.COR_LOG_TEXT,
+            insertbackground="white",
+            relief="flat",
+            bd=0,
+            state="disabled",
+            padx=8, pady=6
+        )
+        sb = ttk.Scrollbar(container, command=self.area_log.yview)
+        self.area_log.configure(yscrollcommand=sb.set)
+        
+        self.area_log.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+
+    # ── MÉTODOS DE LÓGICA E ARQUIVOS ───────────
+    def extrair_csvs_de_zips(self):
+        """
+        Extrai arquivos CSV de dentro de qualquer ZIP na pasta inputs/
+        e os salva na pasta temporaria _extraidos/, adicionando o prefixo
+        do nome do arquivo ZIP para evitar colisoes de nomes.
+        """
+        zips = sorted(glob.glob(os.path.join(PASTA_INPUTS, "*.zip")))
+        if not zips:
+            return []
+
+        if os.path.exists(PASTA_EXTRAIDOS):
+            import shutil
+            for item in os.listdir(PASTA_EXTRAIDOS):
+                if item == ".gitkeep": continue
+                caminho = os.path.join(PASTA_EXTRAIDOS, item)
+                try:
+                    if os.path.isfile(caminho): os.remove(caminho)
+                    elif os.path.isdir(caminho): shutil.rmtree(caminho)
+                except Exception:
+                    pass
+        os.makedirs(PASTA_EXTRAIDOS, exist_ok=True)
+
+        zips_processados = []
+        for zip_path in zips:
+            nome_zip = os.path.splitext(os.path.basename(zip_path))[0]
+            try:
+                with zipfile.ZipFile(zip_path, "r") as zf:
+                    csvs_no_zip = [n for n in zf.namelist() if n.lower().endswith(".csv")]
+                    if not csvs_no_zip:
+                        continue
+                    for csv_interno in csvs_no_zip:
+                        nome_csv = os.path.basename(csv_interno)
+                        nome_destino = f"{nome_zip}_{nome_csv}"
+                        caminho_destino = os.path.join(PASTA_EXTRAIDOS, nome_destino)
+                        with zf.open(csv_interno) as fonte, open(caminho_destino, "wb") as destino:
+                            destino.write(fonte.read())
+                    zips_processados.append(zip_path)
+            except (zipfile.BadZipFile, Exception):
+                pass
+        return zips_processados
+
+    def detectar_csvs_na_pasta(self):
+        """
+        Varre as pastas inputs/ e _extraidos/ para identificar os arquivos.
+        - Arquivo Bling: 'produtos.csv' ou 'produtos_*.csv' em inputs/, ou '*produtos*.csv' em _extraidos/.
+        - Arquivos de Loja: CSVs que contenham colunas de vinculo multiloja (IdProduto ou Nome Loja).
+        """
+        zips_processados = self.extrair_csvs_de_zips()
+
+        arquivo_bling = None
+        arquivos_multiloja = []
+
+        candidato_fixo = os.path.join(PASTA_INPUTS, "produtos.csv")
+        if os.path.exists(candidato_fixo):
+            arquivo_bling = candidato_fixo
+        else:
+            candidatos = sorted(glob.glob(os.path.join(PASTA_INPUTS, "produtos_*.csv")))
+            if candidatos:
+                arquivo_bling = candidatos[-1]
+
+        todos_csvs = sorted(glob.glob(os.path.join(PASTA_INPUTS, "*.csv")))
+        if os.path.isdir(PASTA_EXTRAIDOS):
+            todos_csvs += sorted(glob.glob(os.path.join(PASTA_EXTRAIDOS, "*.csv")))
+
+        for csv in todos_csvs:
+            if arquivo_bling and os.path.abspath(csv) == os.path.abspath(arquivo_bling):
+                continue
+            try:
+                cabecalho = pd.read_csv(csv, sep=";", encoding="utf-8-sig", nrows=0)
+                colunas = list(cabecalho.columns)
+                
+                eh_multiloja = "IdProduto" in colunas or "Nome Loja (Multilojas)" in colunas
+                if eh_multiloja:
+                    arquivos_multiloja.append(csv)
+                elif arquivo_bling is None and "produtos" in os.path.basename(csv).lower():
+                    arquivo_bling = csv
+            except Exception:
+                pass
+
+        return arquivo_bling, arquivos_multiloja, zips_processados
+
+    def atualizar_painel_de_status(self):
+        for widget in self.frame_status.winfo_children():
+            widget.destroy()
+
+        tk.Label(
+            self.frame_status,
+            text="Arquivos detectados na pasta inputs/:",
+            font=("Segoe UI", 10, "bold"),
+            bg=self.COR_BG_PAINEL,
+            fg=self.COR_LABEL,
+        ).pack(anchor="w", pady=(0, 4))
+
+        arquivo_bling, arquivos_multiloja, zips_processados = self.detectar_csvs_na_pasta()
+
+        if zips_processados:
+            for zip_path in zips_processados:
+                tk.Label(
+                    self.frame_status,
+                    text=f"  ZIP   {os.path.basename(zip_path)}",
+                    font=("Segoe UI", 10),
+                    bg=self.COR_BG_PAINEL,
+                    fg="#f0c040", # Amarelo
+                ).pack(anchor="w")
+
+        if arquivo_bling:
+            via_zip = " (via ZIP)" if PASTA_EXTRAIDOS in arquivo_bling else ""
             tk.Label(
-                frame_status,
-                text=f"  OK   Loja: {os.path.basename(caminho)}",
-                font=("Segoe UI", 9),
-                bg="#f0f2f5",
-                fg="#1a7a3c",
+                self.frame_status,
+                text=f"  OK   Bling: {os.path.basename(arquivo_bling)}{via_zip}",
+                font=("Segoe UI", 10),
+                bg=self.COR_BG_PAINEL,
+                fg="#4ec94e", # Verde
             ).pack(anchor="w")
-    else:
-        tk.Label(
-            frame_status,
-            text="  FALTA   Lojas: nenhum arquivo de multiloja encontrado",
-            font=("Segoe UI", 9),
-            bg="#f0f2f5",
-            fg="#c0392b",
-        ).pack(anchor="w")
+        else:
+            tk.Label(
+                self.frame_status,
+                text="  FALTA   Bling: nenhum arquivo de produtos encontrado",
+                font=("Segoe UI", 10),
+                bg=self.COR_BG_PAINEL,
+                fg="#ff6b6b", # Vermelho
+            ).pack(anchor="w")
+
+        if arquivos_multiloja:
+            for caminho in arquivos_multiloja:
+                via_zip = " (via ZIP)" if PASTA_EXTRAIDOS in caminho else ""
+                tk.Label(
+                    self.frame_status,
+                    text=f"  OK   Loja: {os.path.basename(caminho)}{via_zip}",
+                    font=("Segoe UI", 10),
+                    bg=self.COR_BG_PAINEL,
+                    fg="#4ec94e",
+                ).pack(anchor="w")
+        else:
+            tk.Label(
+                self.frame_status,
+                text="  FALTA   Lojas: nenhum arquivo de multiloja encontrado",
+                font=("Segoe UI", 10),
+                bg=self.COR_BG_PAINEL,
+                fg="#ff6b6b",
+            ).pack(anchor="w")
+
+    def limpar_pasta_saidas(self):
+        if os.path.exists(PASTA_SAIDAS):
+            import shutil
+            for item in os.listdir(PASTA_SAIDAS):
+                if item == ".gitkeep": continue
+                caminho = os.path.join(PASTA_SAIDAS, item)
+                try:
+                    if os.path.isfile(caminho): os.remove(caminho)
+                    elif os.path.isdir(caminho): shutil.rmtree(caminho)
+                except Exception:
+                    pass
+        else:
+            os.makedirs(PASTA_SAIDAS, exist_ok=True)
+
+    def abrir_pasta_saidas(self):
+        if os.path.exists(PASTA_SAIDAS):
+            os.startfile(PASTA_SAIDAS)
+        else:
+            messagebox.showinfo("Aviso", "A pasta 'saidas' ainda nao foi criada.")
+
+    def escrever_no_log(self, texto: str, cor_padrao: str = "#d4d4d4"):
+        self.area_log.configure(state="normal")
+        segmentos = re.split(r"(\033\[[0-9;]+m)", texto)
+        cor_atual = cor_padrao
+        contador_tags = 0
+
+        for segmento in segmentos:
+            match_ansi = re.match(r"\033\[([0-9;]+)m", segmento)
+            if match_ansi:
+                codigo = match_ansi.group(1)
+                cor_atual = self.CORES_ANSI.get(codigo, cor_padrao)
+            elif segmento:
+                nome_tag = f"cor_{id(segmento)}_{contador_tags}"
+                contador_tags += 1
+                self.area_log.tag_configure(nome_tag, foreground=cor_atual)
+                self.area_log.insert("end", segmento, nome_tag)
+
+        self.area_log.insert("end", "\n")
+        self.area_log.configure(state="disabled")
+        self.area_log.see("end")
+
+    def executar_atualizacao(self):
+        self.atualizar_painel_de_status()
+        arquivo_bling, arquivos_multiloja, _ = self.detectar_csvs_na_pasta()
+
+        if not arquivo_bling:
+            messagebox.showerror("Arquivo nao encontrado", f"Nenhum arquivo de produtos do Bling encontrado na pasta inputs/.")
+            return
+
+        if not arquivos_multiloja:
+            messagebox.showerror("Arquivo nao encontrado", f"Nenhum arquivo de loja encontrado na pasta inputs/.")
+            return
+
+        self.btn_executar.config(state="disabled")
+        self.btn_abrir.config(state="disabled")
+
+        self.area_log.configure(state="normal")
+        self.area_log.delete("1.0", "end")
+        self.area_log.configure(state="disabled")
+        
+        self.limpar_pasta_saidas()
+        self.escrever_no_log(f"Pasta de trabalho: {PASTA_INPUTS}")
+        self.barra_progresso.start(10)
+
+        def rodar_em_segundo_plano():
+            try:
+                caminho_script = os.path.join(PASTA_BASE, "script.py")
+                resultado = subprocess.run(
+                    [sys.executable, caminho_script],
+                    capture_output=True,
+                    text=True,
+                    cwd=PASTA_BASE,
+                )
+                self.root.after(0, lambda: self.finalizar_execucao(resultado))
+            except Exception as erro:
+                self.root.after(0, lambda: self.finalizar_com_erro(str(erro)))
+
+        threading.Thread(target=rodar_em_segundo_plano, daemon=True).start()
+
+    def finalizar_execucao(self, resultado):
+        self.barra_progresso.stop()
+        self.btn_executar.config(state="normal")
+        self.btn_abrir.config(state="normal")
+
+        if resultado.stdout:
+            for linha in resultado.stdout.strip().split("\n"):
+                self.escrever_no_log(linha)
+
+        if resultado.returncode == 0:
+            self.escrever_no_log("\n" + "-" * 37, "#555")
+            self.escrever_no_log("Arquivos salvos em:  saidas/", self.CORES_ANSI["92"])
+            self.escrever_no_log("  - arquivos _atualizado.csv por loja", self.CORES_ANSI["92"])
+            messagebox.showinfo("Concluido", "Processo finalizado!\n\nArquivos gerados na pasta saidas/")
+        else:
+            self.escrever_no_log("\nERRO:", self.CORES_ANSI["91"])
+            if resultado.stderr:
+                for linha in resultado.stderr.strip().split("\n"):
+                    self.escrever_no_log("  " + linha, self.CORES_ANSI["91"])
+            messagebox.showerror("Erro", "Ocorreu um erro.\nVeja o log para detalhes.")
+
+    def finalizar_com_erro(self, mensagem_erro: str):
+        self.barra_progresso.stop()
+        self.btn_executar.config(state="normal")
+        self.btn_abrir.config(state="normal")
+        self.escrever_no_log(f"Erro inesperado: {mensagem_erro}", self.CORES_ANSI["91"])
+        messagebox.showerror("Erro", f"Erro inesperado:\n{mensagem_erro}")
 
 
-atualizar_painel_de_status()
-
-ttk.Separator(janela, orient="horizontal").pack(fill="x", padx=24, pady=4)
-
-# --- Area de log ---
-# Exibe a saida do script.py em tempo real apos a execucao
-frame_log = tk.Frame(janela, bg="#f0f2f5")
-frame_log.pack(fill="both", expand=True, padx=24)
-
-tk.Label(
-    frame_log,
-    text="Log de execucao:",
-    font=("Segoe UI", 9, "bold"),
-    bg="#f0f2f5",
-    fg="#444",
-).pack(anchor="w")
-
-area_log = scrolledtext.ScrolledText(
-    frame_log,
-    height=12,
-    font=("Consolas", 9),
-    bg="#1e1e1e",
-    fg="#d4d4d4",
-    insertbackground="white",
-    relief="flat",
-    bd=0,
-    state="disabled",
-)
-area_log.pack(fill="both", expand=True, pady=(4, 0))
-
-# --- Barra de progresso ---
-barra_progresso = ttk.Progressbar(janela, mode="indeterminate")
-barra_progresso.pack(fill="x", padx=24, pady=(8, 0))
-
-# --- Botoes ---
-frame_botoes = tk.Frame(janela, bg="#f0f2f5", pady=12)
-frame_botoes.pack()
-
-
-# ==============================================================================
-# ESCRITA NO LOG COM SUPORTE A CORES ANSI
-# ==============================================================================
-
-def escrever_no_log(texto: str, cor_padrao: str = "#d4d4d4"):
-    """
-    Insere uma linha no log da interface, interpretando codigos de cor ANSI
-    emitidos pelo script.py.
-
-    O log e mantido em modo 'disabled' enquanto nao esta sendo escrito para
-    evitar que o usuario edite o conteudo acidentalmente.
-    """
-    area_log.configure(state="normal")
-
-    # Divide o texto em segmentos: sequencias ANSI e texto normal intercalados
-    segmentos = re.split(r"(\033\[[0-9;]+m)", texto)
-    cor_atual = cor_padrao
-    contador_tags = 0
-
-    for segmento in segmentos:
-        match_ansi = re.match(r"\033\[([0-9;]+)m", segmento)
-        if match_ansi:
-            codigo = match_ansi.group(1)
-            cor_atual = CORES_ANSI.get(codigo, cor_padrao)
-        elif segmento:
-            # Cada trecho recebe uma tag unica para poder ter cor diferente
-            nome_tag = f"cor_{id(segmento)}_{contador_tags}"
-            contador_tags += 1
-            area_log.tag_configure(nome_tag, foreground=cor_atual)
-            area_log.insert("end", segmento, nome_tag)
-
-    area_log.insert("end", "\n")
-    area_log.configure(state="disabled")
-    area_log.see("end")  # Rola automaticamente para a ultima linha
-
-
-# ==============================================================================
-# ACOES DOS BOTOES
-# ==============================================================================
-
-def abrir_pasta_saidas():
-    """
-    Abre a pasta 'saidas/' no Explorer do Windows.
-    Se a pasta ainda nao existe, avisa o usuario em vez de abrir um caminho invalido.
-    """
-    pasta_saidas = os.path.join(PASTA_BASE, "saidas")
-    if os.path.exists(pasta_saidas):
-        os.startfile(pasta_saidas)
-    else:
-        messagebox.showinfo(
-            "Aviso",
-            "A pasta 'saidas' ainda nao foi criada.\nExecute o processo primeiro."
-        )
-
-
-def executar_atualizacao():
-    """
-    Ponto de entrada do botao 'Executar'. Valida a presenca dos arquivos
-    necessarios antes de iniciar o processo, e exibe mensagens de erro claras
-    caso algo esteja faltando.
-
-    O script.py e executado em uma thread separada para nao travar a interface
-    enquanto o processamento ocorre.
-    """
-    atualizar_painel_de_status()
-
-    arquivo_bling, arquivos_multiloja = detectar_csvs_na_pasta()
-
-    if not arquivo_bling:
-        messagebox.showerror(
-            "Arquivo nao encontrado",
-            f"Nenhum arquivo de produtos encontrado!\n"
-            f"Esperado: produtos.csv ou produtos_*.csv\n\n"
-            f"Pasta: {PASTA_BASE}"
-        )
-        return
-
-    if not arquivos_multiloja:
-        messagebox.showerror(
-            "Arquivo nao encontrado",
-            f"Nenhum arquivo de loja encontrado!\n"
-            f"Coloque os arquivos exportados do Bling na pasta:\n{PASTA_BASE}"
-        )
-        return
-
-    # Desabilita os botoes durante o processamento para evitar execucoes paralelas
-    botao_executar.config(state="disabled")
-    botao_abrir.config(state="disabled")
-
-    # Limpa o log antes de cada nova execucao
-    area_log.configure(state="normal")
-    area_log.delete("1.0", "end")
-    area_log.configure(state="disabled")
-
-    escrever_no_log(f"Pasta de trabalho: {PASTA_BASE}")
-    barra_progresso.start(10)
-
-    def rodar_em_segundo_plano():
-        """
-        Executa o script.py como subprocesso e captura toda a sua saida.
-
-        Usamos subprocess em vez de importar o modulo diretamente para isolar
-        o ambiente de execucao e garantir que erros no script nao derrubem a
-        interface grafica.
-        """
-        try:
-            caminho_script = os.path.join(PASTA_BASE, "script.py")
-            resultado = subprocess.run(
-                [sys.executable, caminho_script],
-                capture_output=True,
-                text=True,
-                cwd=PASTA_BASE,  # Garante que o script encontre os CSVs na pasta correta
-            )
-            # Atualiza a interface na thread principal (obrigatorio no Tkinter)
-            janela.after(0, lambda: finalizar_execucao(resultado))
-        except Exception as erro:
-            janela.after(0, lambda: finalizar_com_erro(str(erro)))
-
-    threading.Thread(target=rodar_em_segundo_plano, daemon=True).start()
-
-
-def finalizar_execucao(resultado):
-    """
-    Chamada pela thread principal apos o subprocesso terminar.
-    Exibe o log completo e o resultado (sucesso ou erro).
-    """
-    barra_progresso.stop()
-    botao_executar.config(state="normal")
-    botao_abrir.config(state="normal")
-
-    if resultado.stdout:
-        for linha in resultado.stdout.strip().split("\n"):
-            escrever_no_log(linha)
-
-    if resultado.returncode == 0:
-        escrever_no_log("\n" + "-" * 37, "#555")
-        escrever_no_log("Arquivos salvos em:  saidas/", "#4ec94e")
-        escrever_no_log("  - arquivos _atualizado.csv por loja", "#4ec94e")
-        escrever_no_log("  - relatorio_alteracoes.csv", "#4ec94e")
-        messagebox.showinfo("Concluido", "Processo finalizado!\n\nArquivos gerados na pasta saidas/")
-    else:
-        escrever_no_log("\nERRO:", "#ff6b6b")
-        if resultado.stderr:
-            for linha in resultado.stderr.strip().split("\n"):
-                escrever_no_log("  " + linha, "#ff6b6b")
-        messagebox.showerror("Erro", "Ocorreu um erro.\nVeja o log para detalhes.")
-
-
-def finalizar_com_erro(mensagem_erro: str):
-    """
-    Chamada quando ocorre uma excecao inesperada ao tentar iniciar o subprocesso
-    (ex: Python nao encontrado, permissao negada).
-    """
-    barra_progresso.stop()
-    botao_executar.config(state="normal")
-    botao_abrir.config(state="normal")
-    escrever_no_log(f"Erro inesperado: {mensagem_erro}", "#ff6b6b")
-    messagebox.showerror("Erro", f"Erro inesperado:\n{mensagem_erro}")
-
-
-# ==============================================================================
-# DECLARACAO DOS BOTOES
-# (declarados apos as funcoes que referenciam para evitar NameError)
-# ==============================================================================
-
-botao_executar = tk.Button(
-    frame_botoes,
-    text="  Executar atualizacao",
-    font=("Segoe UI", 10, "bold"),
-    bg="#2d6cdf",
-    fg="white",
-    activebackground="#1a4fa3",
-    relief="flat",
-    padx=20,
-    pady=8,
-    cursor="hand2",
-    command=executar_atualizacao,
-)
-botao_executar.pack(side="left", padx=6)
-
-botao_abrir = tk.Button(
-    frame_botoes,
-    text="  Abrir pasta saidas/",
-    font=("Segoe UI", 10),
-    bg="#e8edf5",
-    fg="#333",
-    activebackground="#d0d8e8",
-    relief="flat",
-    padx=20,
-    pady=8,
-    cursor="hand2",
-    command=abrir_pasta_saidas,
-)
-botao_abrir.pack(side="left", padx=6)
-
-
-# ==============================================================================
-# INICIO DA APLICACAO
-# ==============================================================================
-
-janela.mainloop()
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = AtualizadorMultilojaApp(root)
+    root.mainloop()

@@ -1,5 +1,5 @@
 ========================================================
-  ATUALIZADOR DE PREÇOS — Bling para Multiloja
+  ATUALIZADOR DE PREÇOS — Bling para Multiloja (v2.0)
 ========================================================
 
 SOBRE O PROGRAMA
@@ -14,19 +14,19 @@ de atualização em múltiplas lojas.
 
 ARQUIVOS NECESSÁRIOS
 --------------------
-Coloque na mesma pasta do programa:
+Coloque na pasta "inputs/":
 
 1. Arquivo de produtos do Bling
    Pode ser:
-     produtos.csv
-     ou qualquer arquivo que comece com "produtos"
+     - produtos.csv ou produtos_*.csv na pasta "inputs/"
+     - ou compactado dentro de um arquivo `.zip` (ex: bling_produtos.zip)
 
 2. Arquivos da Multiloja (um para cada loja)
-   Exemplo:
-     vinculo_produtos_multiloja_2026-03-24.csv
+   Pode ser:
+     - Planilhas CSV exportadas diretamente na pasta "inputs/"
+     - Compactadas dentro de arquivos `.zip` (ex: shopee.zip, magalu.zip, nuvemshop.zip)
 
-Os arquivos são identificados automaticamente.
-Não é necessário renomear.
+DICA: Se exportar em formato `.zip`, renomeie o arquivo ZIP com o nome descritivo da loja antes de rodar o programa (ex: shopee.zip, magalu.zip). O programa cuidará de extrair e organizar na subpasta "_extraidos/" com o prefixo correto, sem conflito de nomes ou sobrescritas.
 
 
 COMO EXPORTAR OS ARQUIVOS
@@ -42,24 +42,29 @@ Multiloja (para cada loja):
 
 COMO USAR O PROGRAMA
 --------------------
-1. Abra a pasta do programa
-2. Cole os arquivos CSV exportados
-3. Execute o arquivo "interface.pyw" com duplo clique
-4. Verifique se os arquivos foram detectados corretamente
-5. Clique em "Executar atualização"
-6. Aguarde o processamento
-7. Abra a pasta "saidas" para ver os arquivos gerados
+1. Abra a pasta do programa.
+2. Cole os arquivos (CSV ou ZIP) na pasta "inputs/".
+3. Execute o arquivo "interface.pyw" com duplo clique.
+4. Verifique se os arquivos e ZIPs foram detectados no painel superior.
+5. Clique em "Executar atualização".
+6. O programa fará o processamento em segundo plano. Toda a limpeza de pastas anteriores
+   ("saidas/" e "_extraidos/") e a extração dos ZIPs são automáticas.
+7. Monitore o log de execução diretamente no terminal da interface.
+8. Ao final, confira a validação de catálogo exibida em cores:
+   - 🔴 Vermelho (FALTANTE): Perfumes do Bling não vinculados em nenhuma loja.
+   - 🟠 Laranja (PARCIAL): Perfumes do Bling vinculados em algumas lojas, mas ausentes em outras.
+   - 🟣 Magenta (FANTASMA): Perfumes cadastrados nas lojas mas não presentes no Bling.
+9. Clique em "Abrir pasta saidas/" para acessar os arquivos gerados.
 
 
 ARQUIVOS GERADOS
 ----------------
 Na pasta "saidas", será criado:
 
-- [loja]_atualizado.csv
-  Arquivo pronto para importar no Bling
+- [nome_da_loja]_atualizado.csv
+  Arquivo pronto para importar no Bling (atualizado com os preços corretos).
 
-- [loja]_relatorio.csv
-  Lista apenas os produtos que tiveram alteração de preço
+*Nota: O antigo relatório em arquivo csv foi descontinuado, sendo substituído pelo relatório visual no terminal do programa.*
 
 
 COMO IMPORTAR NO BLING
@@ -67,15 +72,15 @@ COMO IMPORTAR NO BLING
 Acesse:
   Integrações > Multilojas > selecionar loja > Importar produtos
 
-Selecione o arquivo "_atualizado.csv" correspondente.
+Selecione o arquivo "_atualizado.csv" correspondente gerado na pasta "saidas/".
 
 
 COMPORTAMENTO DO PROGRAMA
 --------------------------
-- Atualiza o preço normal com base no Bling
-- Ajusta o preço promocional para não ficar maior que o normal
-- Remove produtos sem vínculo com a loja (sem ID)
-- Mantém produtos que não existem no Bling
+- Preço normal na loja é atualizado com base no Bling.
+- Preço promocional só é preenchido se já existia anteriormente na loja (evita promoções acidentais) e nunca fica maior que o preço normal.
+- Produtos sem ID de loja válido são removidos do arquivo atualizado para evitar falhas na importação.
+- Mantém produtos que não existem no Bling intactos.
 
 
 REQUISITOS
@@ -96,6 +101,6 @@ Erro de biblioteca:
   Execute: pip install pandas
 
 Arquivo não detectado:
-  Verifique se está na mesma pasta do programa
+  Certifique-se de que os arquivos exportados foram salvos na pasta "inputs/".
 
 ========================================================

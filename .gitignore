@@ -1,0 +1,9 @@
+# Ignore files in processing folders
+inputs/*
+!inputs/.gitkeep
+
+saidas/*
+!saidas/.gitkeep
+
+_extraidos/*
+!_extraidos/.gitkeep
